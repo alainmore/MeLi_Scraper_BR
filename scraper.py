@@ -5,18 +5,15 @@ Date: Nov 2021
 """
 
 import csv
-import json
 import logging
 import re
 import time
 import warnings
 from datetime import datetime
-from typing import NoReturn
 
 import jinja2
 import pandas as pd
 from bs4 import BeautifulSoup
-from bs4.element import ProcessingInstruction
 from selenium import webdriver
 from selenium.webdriver.support.wait import WebDriverWait
 from snowflake.sqlalchemy import URL
@@ -38,7 +35,7 @@ driver = webdriver.Chrome(chrome_options=chrome_options)
 wait = WebDriverWait(driver, 4)
 
 ROOT_URL = "https://lista.mercadolivre.com.br/"
-MAX_PAGES = 2
+MAX_PAGES = 8
 existing_sellers = []
 processed_sellers = []
 
@@ -58,9 +55,9 @@ def get_existing_sellers(connection):
     log.info(formatted_template)
 
     try:
-        df = pd.read_sql_query(con=connection, sql=formatted_template)
-        log.info(df)
-        for element in df.values.tolist():
+        df_select = pd.read_sql_query(con=connection, sql=formatted_template)
+        log.info(df_select)
+        for element in df_select.values.tolist():
             existing_sellers.append(element[0])
     except Exception as ex:
         log.info("Error 1")
@@ -99,7 +96,7 @@ def insert_lead(connection, seller_info):
     )
 
     insert = """
-        insert into {{COUNTRY}}_WRITABLE.STORE_LEADS_MELI_BY_KEYWORD
+        insert into BR_WRITABLE.MELI_SELLERS
         (LOCATION_FILTER,VENDOR,CATEGORY,MELI_URL,EXPERIENCE,
         SALES,SALES_PERIOD,MELI_STATUS,TOTAL_RATINGS,
         POSITIVE_RATINGS,NEUTRAL_RATINGS,NEGATIVE_RATINGS,
@@ -121,7 +118,7 @@ def insert_lead(connection, seller_info):
         log.error(ex)
 
 
-def get_DOM(url):
+def get_dom(url):
     """
     Regresa el DOM de la página actual como un objeto bs4
     """
@@ -132,7 +129,7 @@ def get_DOM(url):
             driver.get(url)
             soup = BeautifulSoup(driver.page_source, "html.parser")
             break
-        except:
+        except Exception:
             log.exception(
                 "*********ERROR DE CONEXIÓN. ESPERANDO 10 SEGUNDOS PARA INTENTAR OTRA "
                 "VEZ.******"
@@ -151,8 +148,10 @@ def get_leads(connection):
         for row in csvreader:
             city = row["city"]
             category = row["category"]
+            category_url = row["link"]
             results = []
-            results_soup = get_DOM((ROOT_URL + city + "/" + category).replace('"', ""))
+            # results_soup = get_dom((ROOT_URL + city + "/" + category).replace('"', ""))
+            results_soup = get_dom(category_url)
 
             i = 0
             while i <= MAX_PAGES:
@@ -195,10 +194,10 @@ def get_leads(connection):
                 # Nos movemos a la siguiente página
                 next_page_tag = results_soup.find("a", {"title": "Seguinte"})
                 if next_page_tag:
-                    log.info("Siguiente pagina...")
-                    results_soup = get_DOM(next_page_tag["href"])
+                    log.info("Siguiente página...")
+                    results_soup = get_dom(next_page_tag["href"])
                 else:
-                    log.info("No mas paginas...")
+                    log.info("No más páginas...")
                     break
 
             if results:
@@ -225,14 +224,14 @@ def get_leads(connection):
                     log.info(">>>>>>>>>>>")
                     log.info(result.text.strip())
                     log.info(result["href"])
-                    product_soup = get_DOM(result["href"])
+                    product_soup = get_dom(result["href"])
                     vendor_link_tag = product_soup.find(
                         "a", {"class": "ui-pdp-media__action ui-box-component__action"}
                     )
                     if vendor_link_tag:
                         vendor_link = vendor_link_tag["href"]
                         log.info(vendor_link)
-                        vendor_soup = get_DOM(vendor_link)
+                        vendor_soup = get_dom(vendor_link)
                         vendor_name_tag = vendor_soup.find(
                             "h3", {"id": "store-info__name"}
                         )
@@ -317,6 +316,55 @@ def get_leads(connection):
                                 negative_scores,
                                 total_scores,
                             )
+                        else:
+                            log.info("Sin info de calificaciones")
+
+                        metrics_tag = vendor_soup.find(
+                            "div", {"class": "metric__wrapper"}
+                        )
+                        if metrics_tag:
+                            metrics = metrics_tag.find_all("h2", {})
+                            if metrics:
+                                main_metric_1 = metrics[0].text.strip()
+                                main_metric_2 = metrics[-1].text.strip()
+                                log.info(main_metric_1)
+                                log.info(main_metric_2)
+                        else:
+                            log.info("Sin info de metricas")
+
+                        if vendor_name and vendor_name != "":
+                            if vendor_name not in existing_sellers:
+                                log.info(">>>> Vendedor %s es nuevo", vendor_name)
+                                vendor_info = [
+                                    city,
+                                    vendor_name,
+                                    category,
+                                    vendor_link,
+                                    experience,
+                                    sales,
+                                    sales_period,
+                                    status,
+                                    total_scores,
+                                    positive_scores,
+                                    neutral_scores,
+                                    negative_scores,
+                                    main_metric_1,
+                                    main_metric_2,
+                                    location,
+                                ]
+                                log.info(">> SELLER INFO:")
+                                log.info(vendor_info)
+                                insert_lead(connection,vendor_info)
+                                log.info(">> LEAD INSERTADA OK")
+                                existing_sellers.append(vendor_name)
+                            else:
+                                log.info(">>>> Vendedor %s ya existe.", vendor_name)
+                        else:
+                            log.info("No se encontró nombre de vendedor.")
+                    else:
+                        log.info("Sin link a perfil del vendedor")
+            else:
+                log.info("Sin resultados")
 
 
 def main():
